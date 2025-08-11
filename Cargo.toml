@@ -1,0 +1,12 @@
+[package]
+name = "memzero-benchmark"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+bitflags = "2.9.1"
+clap = { version = "4.5.4", features = ["derive"] }
+libc = "0.2"
+nix = { version = "0.28.0", features = ["fs", "ioctl", "mman"] }
+rustix = { version = "1.0.8", features = ["param"] }

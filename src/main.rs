@@ -1,8 +1,9 @@
 use clap::Parser;
 use nix::sys::mman::{mmap_anonymous, MapFlags, ProtFlags};
+use serde::Serialize;
 use std::mem::MaybeUninit;
 use std::slice;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod pagemap;
 
@@ -17,11 +18,43 @@ struct Args {
     /// all pages in this range are dirty, madvise will be issued on the
     /// full range.  (e.g. 128M, 256M, 1G)
     #[arg(short = 'r', long, default_value = "128M")]
-    scanned_size: String,
+    keep_resident: String,
 
     /// Fraction of memory to dirty (0.0 to 1.0)
     #[arg(short = 'd', long, default_value_t = 0.1)]
     dirty_fraction: f64,
+
+    /// Suppress normal output in favor of JSON
+    #[arg(short = 'j', long, action)]
+    json: bool,
+
+    /// Iterations to run
+    #[arg(short = 'i', long, default_value = "1")]
+    iterations: u64,
+}
+
+#[derive(Serialize, Debug)]
+enum Strategy {
+    MemZero,
+    Madvise,
+    PagemapScan,
+}
+
+#[derive(Serialize, Debug)]
+struct BenchResult {
+    pub strategy: Strategy,
+    pub total_size: usize,
+    pub keep_resident: usize,
+    pub dirty_fraction: f64,
+    pub duration: Duration,
+}
+
+macro_rules! qprintln {
+    ($condition:expr, $($arg:tt)*) => {
+        if !$condition {
+            println!($($arg)*);
+        }
+    };
 }
 
 fn parse_size(size_str: &str) -> anyhow::Result<usize> {
@@ -47,8 +80,9 @@ fn parse_size(size_str: &str) -> anyhow::Result<usize> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let total_size = parse_size(&args.size)?;
-    let scanned_size = parse_size(&args.scanned_size)?;
+    let keep_resident_size = parse_size(&args.keep_resident)?;
     let dirty_fraction = args.dirty_fraction;
+    let quiet = args.json;
 
     if !(0.0..=1.0).contains(&dirty_fraction) {
         return Err(anyhow::anyhow!(
@@ -56,27 +90,65 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    println!("--- PAGEMAP_SCAN Benchmark ---");
-    println!(
+    qprintln!(quiet, "--- PAGEMAP_SCAN Benchmark ---");
+    qprintln!(
+        quiet,
         "Total Memory Size: {:.2} MiB",
         total_size as f64 / 1024.0 / 1024.0
     );
-    println!("Dirty Fraction: {:.2}%", dirty_fraction * 100.0);
-    println!("------------------------------\n");
+    qprintln!(
+        quiet,
+        "Dirty Fraction: {:.2}% ({:.0} bytes)",
+        dirty_fraction * 100.0,
+        dirty_fraction * total_size as f64
+    );
+    qprintln!(quiet, "Keep Resident / Scan: {keep_resident_size}");
+    qprintln!(quiet, "------------------------------\n");
 
-    run_benchmark_memset(total_size, dirty_fraction)?;
-    run_benchmark_madvise(total_size, dirty_fraction)?;
-    run_benchmark_pagemap_scan(total_size, dirty_fraction, scanned_size)?;
+    let mut results: Vec<BenchResult> = Vec::new();
+    for _ in 0..args.iterations {
+        results.push(run_benchmark_memset(
+            total_size,
+            dirty_fraction,
+            keep_resident_size,
+            quiet,
+        )?);
+        results.push(run_benchmark_madvise(
+            total_size,
+            dirty_fraction,
+            keep_resident_size,
+            quiet,
+        )?);
+        results.push(run_benchmark_pagemap_scan(
+            total_size,
+            dirty_fraction,
+            keep_resident_size,
+            quiet,
+        )?);
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string(&results)?);
+    }
 
     Ok(())
 }
 
 /// Allocates and dirties memory for a test scenario.
-fn setup_memory(total_size: usize, dirty_fraction: f64) -> anyhow::Result<*mut u8> {
+fn setup_memory(
+    total_size: usize,
+    keep_resident_size: usize,
+    dirty_fraction: f64,
+) -> anyhow::Result<*mut u8> {
     let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
     let flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
     let map = unsafe { mmap_anonymous(None, total_size.try_into()?, prot, flags) }?;
     let map = map.as_ptr() as *mut u8;
+
+    // Trigger page fault on the keep_resident bytes prior to the test
+    // so it isn't skewing the measurements
+    let keep_res_slice = unsafe { slice::from_raw_parts_mut(map, keep_resident_size) };
+    keep_res_slice.fill(0);
 
     // Dirty a fraction of the memory
     let dirty_bytes = (total_size as f64 * dirty_fraction).round() as usize;
@@ -88,55 +160,103 @@ fn setup_memory(total_size: usize, dirty_fraction: f64) -> anyhow::Result<*mut u
     Ok(map)
 }
 
-fn run_benchmark_memset(total_size: usize, dirty_fraction: f64) -> anyhow::Result<()> {
-    println!("Scenario 1: Naive memset");
-    let map = setup_memory(total_size, dirty_fraction)?;
+fn run_benchmark_memset(
+    total_size: usize,
+    dirty_fraction: f64,
+    keep_resident_size: usize,
+    quiet: bool,
+) -> anyhow::Result<BenchResult> {
+    qprintln!(quiet, "Scenario 1: Naive memset");
+    let map = setup_memory(total_size, keep_resident_size, dirty_fraction)?;
     let slice = unsafe { slice::from_raw_parts_mut(map, total_size) };
 
     let start = Instant::now();
     slice.fill(0);
     let duration = start.elapsed();
 
-    println!("  Zeroed all {} bytes.", total_size);
-    println!("  Time taken: {:?}\n", duration);
+    qprintln!(quiet, "  Zeroed all {} bytes.", total_size);
+    qprintln!(quiet, "  Time taken: {:?}\n", duration);
 
     unsafe { libc::munmap(map as *mut libc::c_void, total_size) };
-    Ok(())
+
+    Ok(BenchResult {
+        strategy: Strategy::MemZero,
+        total_size,
+        keep_resident: keep_resident_size,
+        dirty_fraction,
+        duration,
+    })
 }
 
-fn run_benchmark_madvise(total_size: usize, dirty_fraction: f64) -> anyhow::Result<()> {
-    println!("Scenario 2: madvise(MADV_DONTNEED)");
-    let map = setup_memory(total_size, dirty_fraction)?;
+fn run_benchmark_madvise(
+    total_size: usize,
+    dirty_fraction: f64,
+    keep_resident_size: usize,
+    quiet: bool,
+) -> anyhow::Result<BenchResult> {
+    qprintln!(
+        quiet,
+        "Scenario 2: memzero of keep_resident + madvise(MADV_DONTNEED) remaining"
+    );
+    let map = setup_memory(total_size, keep_resident_size, dirty_fraction)?;
 
     let start = Instant::now();
-    let ret = unsafe { libc::madvise(map as *mut libc::c_void, total_size, libc::MADV_DONTNEED) };
+
+    // zero keep_resident bytes
+    let kr_slice = unsafe { slice::from_raw_parts_mut(map, keep_resident_size) };
+    kr_slice.fill(0);
+
+    let rem_ptr = unsafe { map.offset(keep_resident_size as isize) };
+    let ret = unsafe {
+        libc::madvise(
+            rem_ptr as *mut libc::c_void,
+            total_size - keep_resident_size,
+            libc::MADV_DONTNEED,
+        )
+    };
     let duration = start.elapsed();
 
     if ret != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
 
-    println!("  Called madvise on all {} bytes.", total_size);
-    println!("  Time taken: {:?}\n", duration);
+    qprintln!(quiet, "  Zeroed {keep_resident_size} bytes.");
+    qprintln!(
+        quiet,
+        "  Called madvise on {} bytes.",
+        total_size - keep_resident_size
+    );
+    qprintln!(quiet, "  Time taken: {:?}\n", duration);
 
     unsafe { libc::munmap(map as *mut libc::c_void, total_size) };
-    Ok(())
+
+    Ok(BenchResult {
+        strategy: Strategy::Madvise,
+        total_size,
+        keep_resident: keep_resident_size,
+        dirty_fraction,
+        duration,
+    })
 }
 
 fn run_benchmark_pagemap_scan(
     total_size: usize,
     dirty_fraction: f64,
-    scanned_size: usize,
-) -> anyhow::Result<()> {
-    println!("Scenario 3: PAGEMAP_SCAN + targeted memset");
-    let map = setup_memory(total_size, dirty_fraction)?;
-    // let map_addr = map as u64;
+    keep_resident_size: usize,
+    quiet: bool,
+) -> anyhow::Result<BenchResult> {
+    // TODO: add some page size/alignment adjustments
+    qprintln!(
+        quiet,
+        "Scenario 3: PAGEMAP_SCAN + targeted memset + madvise(MADV_DONTNEED) if beyond barrier"
+    );
+    let map = setup_memory(total_size, keep_resident_size, dirty_fraction)?;
     let pages = total_size / rustix::param::page_size();
 
     let start = Instant::now();
 
     let mut regions: Box<[MaybeUninit<pagemap::PageRegion>]> = Box::new_uninit_slice(pages);
-    let dirty_pages = pagemap::dirty_pages_in_region(map, scanned_size, regions.as_mut())?;
+    let dirty_pages = pagemap::dirty_pages_in_region(map, keep_resident_size, regions.as_mut())?;
 
     // println!("Dirty Pages: {dirty_pages:?}");
     let mut total_zeroed = 0;
@@ -148,25 +268,40 @@ fn run_benchmark_pagemap_scan(
         total_zeroed += len;
     }
 
-    if total_zeroed == scanned_size {
+    if total_zeroed == keep_resident_size {
         // madvise the remainder
-        println!("  Had to madvise the full range");
-        let rem_ptr = unsafe { map.offset(isize::try_from(scanned_size)?) };
-        let _ret = unsafe {
+        qprintln!(quiet, "  Had to madvise the full range");
+        let rem_ptr = unsafe { map.offset(isize::try_from(keep_resident_size)?) };
+        let ret = unsafe {
             libc::madvise(
                 rem_ptr as *mut libc::c_void,
-                total_size - scanned_size,
+                total_size - keep_resident_size,
                 libc::MADV_DONTNEED,
             )
         };
+
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
     }
 
     let duration = start.elapsed();
 
-    println!("  Found {} dirty page ranges.", dirty_pages.regions.len());
-    println!("  Zeroed {} bytes.", total_zeroed);
-    println!("  Time taken: {:?}\n", duration);
+    qprintln!(
+        quiet,
+        "  Found {} dirty page ranges.",
+        dirty_pages.regions.len()
+    );
+    qprintln!(quiet, "  Zeroed {} bytes.", total_zeroed);
+    qprintln!(quiet, "  Time taken: {:?}\n", duration);
 
     unsafe { libc::munmap(map as *mut libc::c_void, total_size) };
-    Ok(())
+
+    Ok(BenchResult {
+        strategy: Strategy::PagemapScan,
+        total_size,
+        keep_resident: keep_resident_size,
+        dirty_fraction,
+        duration,
+    })
 }

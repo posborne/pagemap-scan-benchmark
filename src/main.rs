@@ -41,7 +41,6 @@ enum Strategy {
     MemZero,
     Madvise,
     PagemapScan,
-    Heuristic,
 }
 
 #[derive(Debug)]
@@ -137,7 +136,6 @@ fn main() -> anyhow::Result<()> {
                     run_benchmark_memset(&bench_args),
                     run_benchmark_madvise(&bench_args),
                     run_benchmark_pagemap_scan(&bench_args),
-                    run_benchmark_heuristic(&bench_args),
                 ]
             })
             .flatten()
@@ -150,7 +148,6 @@ fn main() -> anyhow::Result<()> {
                     run_benchmark_memset(&bench_args),
                     run_benchmark_madvise(&bench_args),
                     run_benchmark_pagemap_scan(&bench_args),
-                    run_benchmark_heuristic(&bench_args),
                 ]
             })
             .flatten()
@@ -297,28 +294,4 @@ fn run_benchmark_pagemap_scan(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         threads,
         processes,
     })
-}
-
-fn run_benchmark_heuristic(args: &BenchArgs) -> anyhow::Result<BenchResult> {
-    let BenchArgs {
-        total_size, quiet, ..
-    }: BenchArgs = *args;
-    qprintln!(
-        quiet,
-        "Scenario 4: Try to do the fastest thing using heuristics"
-    );
-
-    let mut bench_result = if total_size <= 128 * 1024 {
-        // for small regions, avoid the syscall
-        run_benchmark_memset(args)?
-    } else if total_size >= 1 * 1024 * 1024 {
-        // for large regions, use madvise so we don't keep
-        // tons of memory resident
-        run_benchmark_madvise(args)?
-    } else {
-        run_benchmark_pagemap_scan(args)?
-    };
-
-    bench_result.strategy = Strategy::Heuristic;
-    Ok(bench_result)
 }

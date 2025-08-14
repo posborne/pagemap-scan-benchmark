@@ -129,18 +129,33 @@ fn main() -> anyhow::Result<()> {
         .num_threads(args.threads)
         .build_global()?;
 
-    let results = (0..args.iterations)
-        .into_par_iter()
-        .map(|_i| {
-            [
-                run_benchmark_memset(&bench_args),
-                run_benchmark_madvise(&bench_args),
-                run_benchmark_pagemap_scan(&bench_args),
-                run_benchmark_heuristic(&bench_args),
-            ]
-        })
-        .flatten()
-        .collect::<anyhow::Result<Vec<BenchResult>>>()?;
+    let results = if args.threads > 1 {
+        (0..args.iterations)
+            .into_par_iter()
+            .map(|_i| {
+                [
+                    run_benchmark_memset(&bench_args),
+                    run_benchmark_madvise(&bench_args),
+                    run_benchmark_pagemap_scan(&bench_args),
+                    run_benchmark_heuristic(&bench_args),
+                ]
+            })
+            .flatten()
+            .collect::<anyhow::Result<Vec<BenchResult>>>()?
+    } else {
+        (0..args.iterations)
+            .into_iter()
+            .map(|_i| {
+                [
+                    run_benchmark_memset(&bench_args),
+                    run_benchmark_madvise(&bench_args),
+                    run_benchmark_pagemap_scan(&bench_args),
+                    run_benchmark_heuristic(&bench_args),
+                ]
+            })
+            .flatten()
+            .collect::<anyhow::Result<Vec<BenchResult>>>()?
+    };
 
     if args.json {
         println!("{}", serde_json::to_string(&results)?);

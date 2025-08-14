@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
-ITERATIONS=${ITERATIONS:-25}
-PARALLEL=${PARALLEL:-16}
+ITERATIONS=${ITERATIONS:-100}
+PARALLEL=${PARALLEL:-32}
 
 run_test() {
     size="$1"
@@ -22,8 +22,10 @@ run_test_array() {
     run_test $size .05
     run_test $size .01
     run_test $size .001
+    run_test $size 0
 }
 
+run_test_array 8K
 run_test_array 16K
 run_test_array 32K
 run_test_array 64K

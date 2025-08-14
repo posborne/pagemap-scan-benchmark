@@ -32,6 +32,7 @@ enum Strategy {
     MemZero,
     Madvise,
     PagemapScan,
+    Heuristic,
 }
 
 #[derive(Debug)]
@@ -209,6 +210,7 @@ fn run_benchmark_pagemap_scan(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         quiet,
     } = *args;
     qprintln!(quiet, "Scenario 3: Only memset dirty pages");
+    assert_eq!(total_size % rustix::param::page_size(), 0);
     let map = setup_memory(total_size, dirty_fraction, false)?;
     let pages = total_size / rustix::param::page_size();
 
@@ -243,4 +245,28 @@ fn run_benchmark_pagemap_scan(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         dirty_fraction,
         duration,
     })
+}
+
+fn run_benchmark_heuristic(args: &BenchArgs) -> anyhow::Result<BenchResult> {
+    let BenchArgs {
+        total_size, quiet, ..
+    } = *args;
+    qprintln!(
+        quiet,
+        "Scenario 4: Try to do the fastest thing using heuristics"
+    );
+
+    let mut bench_result = if total_size <= 128 * 1024 {
+        // for small regions, avoid the syscall
+        run_benchmark_memset(args)?
+    } else if total_size >= 1 * 1024 * 1024 {
+        // for large regions, use madvise so we don't keep
+        // tons of memory resident
+        run_benchmark_madvise(args)?
+    } else {
+        run_benchmark_pagemap_scan(args)?
+    };
+
+    bench_result.strategy = Strategy::Heuristic;
+    Ok(bench_result)
 }

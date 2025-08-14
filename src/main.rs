@@ -1,5 +1,6 @@
 use clap::Parser;
 use nix::sys::mman::{mmap_anonymous, MapFlags, ProtFlags};
+use rayon::prelude::*;
 use serde::Serialize;
 use std::mem::MaybeUninit;
 use std::slice;
@@ -18,8 +19,16 @@ struct Args {
     #[arg(short = 'd', long, default_value_t = 0.1)]
     dirty_fraction: f64,
 
+    /// Parallel threads to run
+    #[arg(short = 't', long, default_value_t = 1)]
+    threads: usize,
+
+    /// Parallel processes being run (just for documentation)
+    #[arg(short = 'p', long, default_value_t = 1)]
+    processes: usize,
+
     /// Suppress normal output in favor of JSON
-    #[arg(short = 'j', long, action)]
+    #[arg(long, action)]
     json: bool,
 
     /// Iterations to run
@@ -40,6 +49,8 @@ struct BenchArgs {
     total_size: usize,
     dirty_fraction: f64,
     quiet: bool,
+    threads: usize,
+    processes: usize,
 }
 
 #[derive(Serialize, Debug)]
@@ -48,6 +59,8 @@ struct BenchResult {
     pub total_size: usize,
     pub dirty_fraction: f64,
     pub duration: Duration,
+    pub threads: usize,
+    pub processes: usize,
 }
 
 macro_rules! qprintln {
@@ -88,6 +101,8 @@ fn main() -> anyhow::Result<()> {
         total_size,
         dirty_fraction,
         quiet,
+        threads: args.threads,
+        processes: args.processes,
     };
 
     if !(0.0..=1.0).contains(&dirty_fraction) {
@@ -110,12 +125,22 @@ fn main() -> anyhow::Result<()> {
     );
     qprintln!(quiet, "------------------------------\n");
 
-    let mut results: Vec<BenchResult> = Vec::new();
-    for _ in 0..args.iterations {
-        results.push(run_benchmark_memset(&bench_args)?);
-        results.push(run_benchmark_madvise(&bench_args)?);
-        results.push(run_benchmark_pagemap_scan(&bench_args)?);
-    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()?;
+
+    let results = (0..args.iterations)
+        .into_par_iter()
+        .map(|_i| {
+            [
+                run_benchmark_memset(&bench_args),
+                run_benchmark_madvise(&bench_args),
+                run_benchmark_pagemap_scan(&bench_args),
+                run_benchmark_heuristic(&bench_args),
+            ]
+        })
+        .flatten()
+        .collect::<anyhow::Result<Vec<BenchResult>>>()?;
 
     if args.json {
         println!("{}", serde_json::to_string(&results)?);
@@ -151,6 +176,8 @@ fn run_benchmark_memset(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         quiet,
+        threads,
+        processes,
     } = *args;
     qprintln!(quiet, "Scenario 1: Naive memset on all pages");
     let map = setup_memory(total_size, dirty_fraction, true)?;
@@ -170,6 +197,8 @@ fn run_benchmark_memset(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         duration,
+        threads,
+        processes,
     })
 }
 
@@ -178,6 +207,8 @@ fn run_benchmark_madvise(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         quiet,
+        threads,
+        processes,
     } = *args;
     qprintln!(quiet, "Scenario 2: use madvise on all pages");
     let map = setup_memory(total_size, dirty_fraction, false)?;
@@ -200,6 +231,8 @@ fn run_benchmark_madvise(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         duration,
+        threads,
+        processes,
     })
 }
 
@@ -208,6 +241,8 @@ fn run_benchmark_pagemap_scan(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         quiet,
+        threads,
+        processes,
     } = *args;
     qprintln!(quiet, "Scenario 3: Only memset dirty pages");
     assert_eq!(total_size % rustix::param::page_size(), 0);
@@ -244,13 +279,15 @@ fn run_benchmark_pagemap_scan(args: &BenchArgs) -> anyhow::Result<BenchResult> {
         total_size,
         dirty_fraction,
         duration,
+        threads,
+        processes,
     })
 }
 
 fn run_benchmark_heuristic(args: &BenchArgs) -> anyhow::Result<BenchResult> {
     let BenchArgs {
         total_size, quiet, ..
-    } = *args;
+    }: BenchArgs = *args;
     qprintln!(
         quiet,
         "Scenario 4: Try to do the fastest thing using heuristics"

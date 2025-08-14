@@ -1,15 +1,27 @@
 #!/usr/bin/bash
 
-ITERATIONS=${ITERATIONS:-100}
-PARALLEL=${PARALLEL:-32}
+set -e
+
+THREADS="${THREADS:-4}"
+PROCESSES="${PROCESSES:-16}"
+ITERATIONS="${ITERATIONS:-100}"
 
 run_test() {
     size="$1"
     dirty_pct="$2"
-    fname="res-i${ITERATIONS}-j${PARALLEL}-${size}-${dirty_pct}.json"
+    fname="res-i${ITERATIONS}-p${PROCESSES}-t${THREADS}-${size}-${dirty_pct}.json"
 
     echo "${fname}"
-    seq ${PARALLEL} | parallel -n0 -j 16 ./target/release/pagemap-scan-benchmark -s "${size}" -d "${dirty_pct}" -i "${ITERATIONS}" -j | jq -s> "${fname}"
+
+    seq "${PROCESSES}" | parallel -n0 -j "${PROCESSES}" \
+        ./target/release/pagemap-scan-benchmark \
+        -s "${size}" \
+        -d "${dirty_pct}" \
+        -i "${ITERATIONS}" \
+        -t "${THREADS}" \
+        -p "${PROCESSES}" \
+        --json \
+        | jq -s> "${fname}"
 }
 
 run_test_array() {
@@ -25,6 +37,7 @@ run_test_array() {
     run_test $size 0
 }
 
+cargo build --release
 run_test_array 8K
 run_test_array 16K
 run_test_array 32K

@@ -231,8 +231,8 @@ fn run_benchmark_memset(
     args: &BenchArgs,
     region: &mut MemoryRegion,
 ) -> anyhow::Result<BenchResult> {
-    region.make_dirty();
     let start = Instant::now();
+    region.make_dirty();
     region.as_mut_slice().fill(0);
     let duration = start.elapsed();
 
@@ -243,8 +243,8 @@ fn run_benchmark_madvise(
     args: &BenchArgs,
     region: &mut MemoryRegion,
 ) -> anyhow::Result<BenchResult> {
-    region.make_dirty();
     let start = Instant::now();
+    region.make_dirty();
     let ret = unsafe {
         libc::madvise(
             region.ptr as *mut libc::c_void,
@@ -267,9 +267,8 @@ fn run_benchmark_pagemap_scan(
 ) -> anyhow::Result<BenchResult> {
     let pages = args.total_size / rustix::param::page_size();
 
-    region.make_dirty();
     let start = Instant::now();
-
+    region.make_dirty();
     let mut regions: Box<[MaybeUninit<pagemap::PageRegion>]> = Box::new_uninit_slice(pages);
     let dirty_pages =
         pagemap::dirty_pages_in_region(region.ptr, args.total_size, regions.as_mut())?;
